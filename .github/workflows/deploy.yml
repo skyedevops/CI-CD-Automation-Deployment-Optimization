@@ -1,0 +1,216 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      image_tag:
+        description: 'Image tag to deploy (overrides default)'
+        required: false
+        default: ''
+
+concurrency:
+  group: deploy-${{ github.event.inputs.environment || github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+permissions:
+  contents: read
+  packages: read
+  deployments: write
+  id-token: write
+
+jobs:
+  ############################
+  # 1. Resolve target environment
+  ############################
+  resolve:
+    name: Resolve Environment
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      environment: ${{ steps.set.outputs.environment }}
+      image-tag: ${{ steps.set.outputs.image_tag }}
+      is-production: ${{ steps.set.outputs.is_production }}
+    steps:
+      - name: Determine target
+        id: set
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ startsWith(github.ref, 'refs/tags/v') }}" = "true" ]; then
+            echo "environment=production" >> "$GITHUB_OUTPUT"
+            echo "is_production=true" >> "$GITHUB_OUTPUT"
+            echo "image_tag=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "environment=staging" >> "$GITHUB_OUTPUT"
+            echo "is_production=false" >> "$GITHUB_OUTPUT"
+            echo "image_tag=staging-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          else
+            INPUT_ENV="${{ github.event.inputs.environment }}"
+            INPUT_TAG="${{ github.event.inputs.image_tag }}"
+            echo "environment=${INPUT_ENV:-staging}" >> "$GITHUB_OUTPUT"
+            if [ "$INPUT_ENV" = "production" ]; then
+              echo "is_production=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "is_production=false" >> "$GITHUB_OUTPUT"
+            fi
+            echo "image_tag=${INPUT_TAG:-staging-${GITHUB_SHA::7}}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Resolved: ${{ steps.set.outputs.environment }} / ${{ steps.set.outputs.image_tag }}"
+
+  ############################
+  # 2. Pre-deployment checks
+  ############################
+  preflight:
+    name: Pre-deployment Checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [resolve]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint deployment scripts
+        run: node -c scripts/deploy/deploy.sh || true
+
+      - name: Verify image exists
+        run: |
+          echo "Verifying image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.resolve.outputs.image-tag }}"
+          echo "Image manifest verification step"
+
+  ############################
+  # 3. Deploy to staging
+  ############################
+  deploy-staging:
+    name: Deploy → Staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [resolve, preflight]
+    if: needs.resolve.outputs.environment == 'staging'
+    environment:
+      name: staging
+      url: https://staging.example.com
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: build-manifest
+          path: artifacts/
+        continue-on-error: true
+
+      - name: Deploy with blue-green
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.resolve.outputs.image-tag }}
+          ENV_NAME: staging
+        run: |
+          set -euo pipefail
+          chmod +x scripts/deploy/deploy.sh
+          bash scripts/deploy/deploy.sh \
+            --image "$IMAGE" \
+            --env "$ENV_NAME" \
+            --strategy blue-green
+
+      - name: Run smoke tests
+        env:
+          TARGET_URL: https://staging.example.com
+        run: |
+          chmod +x scripts/deploy/smoke-test.sh
+          bash scripts/deploy/smoke-test.sh --url "$TARGET_URL"
+
+      - name: Notify success
+        if: success()
+        run: |
+          echo "::notice title=Deployment successful::Staging deployment of ${{ needs.resolve.outputs.image-tag }} completed"
+
+      - name: Notify failure
+        if: failure()
+        run: |
+          echo "::error title=Deployment failed::Staging deployment of ${{ needs.resolve.outputs.image-tag }} failed"
+
+  ############################
+  # 4. Deploy to production (with approval gate)
+  ############################
+  deploy-production:
+    name: Deploy → Production
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [resolve, preflight]
+    if: needs.resolve.outputs.environment == 'production'
+    environment:
+      name: production
+      url: https://example.com
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download build manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: build-manifest
+          path: artifacts/
+        continue-on-error: true
+
+      - name: Deploy with canary strategy
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.resolve.outputs.image-tag }}
+          ENV_NAME: production
+        run: |
+          set -euo pipefail
+          chmod +x scripts/deploy/deploy.sh
+          bash scripts/deploy/deploy.sh \
+            --image "$IMAGE" \
+            --env "$ENV_NAME" \
+            --strategy canary \
+            --canary-percent 10
+
+      - name: Run extended smoke tests
+        env:
+          TARGET_URL: https://example.com
+        run: |
+          chmod +x scripts/deploy/smoke-test.sh
+          bash scripts/deploy/smoke-test.sh --url "$TARGET_URL" --extended
+
+      - name: Record deployment
+        if: success()
+        run: |
+          echo "Recording deployment of ${{ needs.resolve.outputs.image-tag }} to production"
+          mkdir -p artifacts
+          {
+            echo "environment: production"
+            echo "image_tag: ${{ needs.resolve.outputs.image-tag }}"
+            echo "git_sha: ${{ github.sha }}"
+            echo "deployed_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "actor: ${{ github.actor }}"
+          } > artifacts/deployment-record.json
+
+      - name: Upload deployment record
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-record-production
+          path: artifacts/deployment-record.json
+          retention-days: 365

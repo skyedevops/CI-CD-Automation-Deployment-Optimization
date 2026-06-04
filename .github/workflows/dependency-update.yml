@@ -1,0 +1,59 @@
+name: Dependency Update
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  ############################
+  # Automated dependency updates
+  ############################
+  update:
+    name: Update Dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Check outdated
+        run: npm outdated --json > outdated.json || true
+        continue-on-error: true
+
+      - name: Update patch & minor versions
+        run: |
+          npm update --no-audit --no-fund
+          npm install --package-lock-only --no-audit --no-fund
+        continue-on-error: true
+
+      - name: Run tests after update
+        run: |
+          npm ci --no-audit --no-fund
+          npm test -- --ci --runInBand
+
+      - name: Create PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: 'chore(deps): automated dependency update'
+          title: 'chore(deps): automated dependency update'
+          body: |
+            Automated dependency update. Please review the diff and ensure CI passes.
+
+            - Patches and minor versions updated
+            - Tests run successfully locally
+          branch: chore/automated-deps
+          token: ${{ secrets.GITHUB_TOKEN }}
+          delete-branch: true

@@ -1,0 +1,83 @@
+version: "3.9"
+
+x-app-env: &app-env
+  NODE_ENV: ${NODE_ENV:-production}
+  PORT: 3000
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: production
+      args:
+        BUILDKIT_INLINE_CACHE: 1
+    image: ci-cd-demo-app:latest
+    container_name: ci-cd-demo-app
+    restart: unless-stopped
+    env_file:
+      - ../.env.example
+    environment:
+      <<: *app-env
+      GIT_SHA: ${GIT_SHA:-local}
+      APP_VERSION: ${APP_VERSION:-0.0.0}
+    ports:
+      - "${PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3000/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - app-net
+
+  app-blue:
+    profiles: ["blue-green"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: production
+    image: ci-cd-demo-app:blue
+    container_name: ci-cd-demo-app-blue
+    environment:
+      <<: *app-env
+      DEPLOY_SLOT: blue
+    ports:
+      - "3001:3000"
+    networks:
+      - app-net
+
+  app-green:
+    profiles: ["blue-green"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: production
+    image: ci-cd-demo-app:green
+    container_name: ci-cd-demo-app-green
+    environment:
+      <<: *app-env
+      DEPLOY_SLOT: green
+    ports:
+      - "3002:3000"
+    networks:
+      - app-net
+
+networks:
+  app-net:
+    driver: bridge

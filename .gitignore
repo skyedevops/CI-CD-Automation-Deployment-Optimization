@@ -1,0 +1,17 @@
+node_modules/
+coverage/
+dist/
+build/
+*.log
+.env
+.env.local
+.DS_Store
+.vscode/
+.idea/
+*.tgz
+.npm/
+.eslintcache
+.cache/
+.tmp/
+deploy.env
+artifacts/
