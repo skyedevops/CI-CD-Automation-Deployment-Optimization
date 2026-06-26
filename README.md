@@ -22,7 +22,7 @@ In many traditional environments, deployments are the "scariest" part of the cyc
 ### 🏗️ High-Level Architecture
 The system implements a linear progression from code commit to production traffic, with integrated quality gates at every stage.
 
-![CI/CD Pipeline Diagram](assets/cicd-pipeline.png)
+![CI/CD Pipeline Diagram](assets/cicd-pipeline.svg)
 
 ### 🎯 Key Engineering Decisions
 
